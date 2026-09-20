@@ -2,62 +2,227 @@ package com.guruvision.bot
 
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 
-data class SignalResult(
-    val signal: String,
-    val confidence: Double,
-    val reason: String,
-    val price: Double?
+data class PricePoint(
+    val timestamp: Long,
+    val price: Double
 )
 
-class SignalEngine(
-    private val windowMs: Long = 5_000L,
-    private val threshold: Double = 0.82
-) {
-    private val samples = ArrayDeque<Pair<Long, Double>>()
+enum class Signal {
+    CALL,
+    PUT,
+    RANGE,
+    WAIT
+}
 
-    fun add(
-        price: Double,
-        now: Long = System.currentTimeMillis(),
-        candleBias: Int = 0,
-        candleConfidence: Double = 0.0
-    ): SignalResult {
-        samples.addLast(now to price)
-        while (samples.isNotEmpty() && now - samples.first().first > windowMs) samples.removeFirst()
+data class SignalResult(
+    val signal: Signal,
+    val confidence: Double,
+    val price: Double,
+    val reason: String,
+    val horizonSeconds: Int = 5
+)
 
-        if (samples.size < 8) return SignalResult("WAIT", 0.0, "warming_up_${samples.size}/8", price)
+class SignalEngine {
 
-        val values = samples.map { it.second }
-        val first = values.first()
-        val last = values.last()
-        val move = last - first
-        val span = (values.maxOrNull() ?: last) - (values.minOrNull() ?: first)
-        if (span <= 0.0) return SignalResult("RANGE", 1.0, "flat", last)
+    companion object {
+        const val HORIZON_SECONDS = 5
 
-        var up = 0
-        var down = 0
-        for (i in 1 until values.size) {
-            if (values[i] > values[i - 1]) up++
-            if (values[i] < values[i - 1]) down++
-        }
-        val total = max(1, up + down)
-        val persistence = max(up, down).toDouble() / total
-        val movement = minOf(1.0, abs(move) / (span * 0.55))
-        val priceConfidence = 0.50 * persistence + 0.50 * movement
+        // Signal is produced only when the score reaches this level.
+        // This is a model score, NOT a win probability.
+        const val CONFIDENCE_THRESHOLD = 0.82
 
-        val direction = if (move > 0) 1 else if (move < 0) -1 else 0
-        val agreement = if (candleBias == 0 || direction == 0) 0.5
-        else if (candleBias == direction) 1.0 else 0.0
-        val confidence = (0.80 * priceConfidence + 0.20 * agreement * candleConfidence.coerceIn(0.0, 1.0)).coerceIn(0.0, 1.0)
+        // Minimum movement required to avoid calling tiny noise a trend.
+        const val MIN_MOVE_RATIO = 0.000015
 
-        if (abs(move) <= span * 0.25 && span / last < 0.00008)
-            return SignalResult("RANGE", 0.80, "compressed", last)
+        // Require the recent observations to agree.
+        const val MIN_DIRECTION_AGREEMENT = 0.75
+    }
 
-        if (direction != 0 && confidence >= threshold && persistence >= 0.70) {
-            val signal = if (direction > 0) "CALL" else "PUT"
-            return SignalResult(signal, confidence, "persistent_5s_candle_${if (candleBias == direction) "agree" else "neutral"}", last)
+    private val prices = ArrayDeque<PricePoint>()
+
+    fun addPrice(price: Double, timestamp: Long = System.currentTimeMillis()): SignalResult {
+        if (!price.isFinite() || price <= 0.0) {
+            return SignalResult(
+                Signal.WAIT,
+                0.0,
+                price,
+                "Invalid price"
+            )
         }
 
-        return SignalResult("WAIT", confidence, "below_threshold", last)
+        prices.addLast(PricePoint(timestamp, price))
+
+        // Keep approximately the latest 5 seconds + small buffer.
+        val cutoff = timestamp - 5500L
+
+        while (prices.isNotEmpty() && prices.first().timestamp < cutoff) {
+            prices.removeFirst()
+        }
+
+        if (prices.size < 5) {
+            return SignalResult(
+                Signal.WAIT,
+                0.0,
+                price,
+                "Collecting 5-second price window"
+            )
+        }
+
+        return calculate5SecondSignal()
+    }
+
+    private fun calculate5SecondSignal(): SignalResult {
+
+        val current = prices.last()
+        val first = prices.first()
+
+        val totalMove = current.price - first.price
+
+        val moveRatio =
+            abs(totalMove) / first.price
+
+        // Too little movement = noise/range.
+        if (moveRatio < MIN_MOVE_RATIO) {
+            return SignalResult(
+                Signal.RANGE,
+                0.82,
+                current.price,
+                "5-second movement is too small; range condition"
+            )
+        }
+
+        var upward = 0
+        var downward = 0
+
+        val list = prices.toList()
+
+        for (i in 1 until list.size) {
+
+            val previous = list[i - 1].price
+            val now = list[i].price
+
+            if (now > previous) {
+                upward++
+            } else if (now < previous) {
+                downward++
+            }
+        }
+
+        val totalChanges = max(1, upward + downward)
+
+        val upAgreement =
+            upward.toDouble() / totalChanges
+
+        val downAgreement =
+            downward.toDouble() / totalChanges
+
+        val directionAgreement =
+            max(upAgreement, downAgreement)
+
+        /*
+         * Acceleration:
+         * Compare movement in the first half and second half
+         * of the 5-second observation window.
+         */
+
+        val midpoint = list.size / 2
+
+        val firstHalfMove =
+            list[midpoint].price - list.first().price
+
+        val secondHalfMove =
+            list.last().price - list[midpoint].price
+
+        val acceleration =
+            abs(secondHalfMove) - abs(firstHalfMove)
+
+        val accelerationScore =
+            min(
+                1.0,
+                abs(acceleration) /
+                    max(abs(totalMove), 1e-10)
+            )
+
+        /*
+         * Direction score.
+         */
+        val directionScore =
+            min(
+                1.0,
+                directionAgreement
+            )
+
+        /*
+         * Movement score.
+         */
+        val movementScore =
+            min(
+                1.0,
+                moveRatio / 0.00015
+            )
+
+        /*
+         * Final model score.
+         *
+         * Direction is weighted most heavily because this is
+         * a 5-second CALL/PUT direction engine.
+         */
+        val confidence =
+            (
+                directionScore * 0.55 +
+                movementScore * 0.30 +
+                accelerationScore * 0.15
+            ).coerceIn(0.0, 1.0)
+
+        /*
+         * Do not produce CALL/PUT unless the direction remained
+         * sufficiently consistent throughout the observation window.
+         */
+        if (directionAgreement < MIN_DIRECTION_AGREEMENT) {
+
+            return SignalResult(
+                Signal.WAIT,
+                confidence,
+                current.price,
+                "5-second direction is unstable"
+            )
+        }
+
+        if (confidence < CONFIDENCE_THRESHOLD) {
+
+            return SignalResult(
+                Signal.WAIT,
+                confidence,
+                current.price,
+                "5-second confidence threshold not reached"
+            )
+        }
+
+        return if (totalMove > 0) {
+
+            SignalResult(
+                signal = Signal.CALL,
+                confidence = confidence,
+                price = current.price,
+                reason =
+                    "5-second upward movement remained consistent"
+            )
+
+        } else {
+
+            SignalResult(
+                signal = Signal.PUT,
+                confidence = confidence,
+                price = current.price,
+                reason =
+                    "5-second downward movement remained consistent"
+            )
+        }
+    }
+
+    fun reset() {
+        prices.clear()
     }
 }
