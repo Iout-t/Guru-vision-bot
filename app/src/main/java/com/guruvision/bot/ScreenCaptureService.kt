@@ -2,12 +2,13 @@ package com.guruvision.bot
 
 import android.app.*
 import android.content.Context
-import android.content.pm.ServiceInfo
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -16,6 +17,9 @@ import androidx.core.app.NotificationCompat
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import com.guruvision.bot.overlay.SignalOverlay
+import com.guruvision.bot.vision.CandleDetector
+import com.guruvision.bot.vision.PatternClassifier
 import java.util.Locale
 
 class ScreenCaptureService : Service() {
@@ -25,13 +29,23 @@ class ScreenCaptureService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     private val engine = SignalEngine()
+    private val overlay by lazy { SignalOverlay(this) }
+    private val candleDetector = CandleDetector()
+    private val patternClassifier = PatternClassifier()
+
+    private var lastProcess = 0L
+    private var lastUiUpdate = 0L
+    private var frameCount = 0
+    private var processing = false
+    private var assetVerified = false
+    private var lastPrice: Double? = null
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
         startForeground(
             42,
-            notification("GuruVision: starting…"),
+            notification("CAPTURE: starting…"),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
         )
     }
@@ -64,7 +78,7 @@ class ScreenCaptureService : Service() {
         val h = dm.heightPixels
         val dpi = dm.densityDpi
 
-        reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+        reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
         display = projection.createVirtualDisplay(
             "GuruVisionCapture",
             w, h, dpi,
@@ -72,11 +86,17 @@ class ScreenCaptureService : Service() {
             reader.surface, null, handler
         )
 
+        publish("CAPTURE: OK • waiting for EUR/USD OCR")
+
         reader.setOnImageAvailableListener({ r ->
             val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
             try {
-                // Process at most about 4 frames/sec to avoid hammering OCR.
-                processImage(image.width, image.height, image.planes[0].buffer)
+                val now = System.currentTimeMillis()
+                if (now - lastProcess < 350L || processing) return@setOnImageAvailableListener
+                lastProcess = now
+                frameCount++
+                processing = true
+                processImage(image, now)
             } finally {
                 image.close()
             }
@@ -85,40 +105,89 @@ class ScreenCaptureService : Service() {
         return START_STICKY
     }
 
-    private var lastProcess = 0L
+    private fun processImage(image: Image, now: Long) {
+        val bitmap = imageToBitmap(image)
+        if (bitmap == null) {
+            processing = false
+            publish("CAPTURE: OK • frame conversion failed")
+            return
+        }
 
-    private fun processImage(width: Int, height: Int, buffer: java.nio.ByteBuffer) {
-        val now = System.currentTimeMillis()
-        if (now - lastProcess < 250) return
-        lastProcess = now
-
-        // Copy the current frame. The first prototype sends the full frame to OCR.
-        // A later calibration screen can define exact EUR/USD price/chart crop rectangles.
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        buffer.rewind()
-        bitmap.copyPixelsFromBuffer(buffer)
-
-        val image = InputImage.fromBitmap(bitmap, 0)
-        recognizer.process(image)
+        val input = InputImage.fromBitmap(bitmap, 0)
+        recognizer.process(input)
             .addOnSuccessListener { result ->
-                val text = result.text
-                val price = PriceParser.findEurUsdPrice(text)
-                if (price != null) {
-                    val signal = engine.add(price, now)
-                    updateNotification(signal.signal, signal.confidence, price)
+                val parsed = PriceParser.parse(result.text)
+                assetVerified = parsed.assetDetected
+                lastPrice = parsed.price
+
+                if (!parsed.assetDetected) {
+                    publish("CAPTURE: OK • OCR: ${if (result.text.isBlank()) "EMPTY" else "no EUR/USD"}")
+                    overlay.show("WAIT • select EUR/USD OTC", 0.0)
+                    return@addOnSuccessListener
                 }
-                bitmap.recycle()
+
+                val price = parsed.price
+                if (price == null) {
+                    publish("CAPTURE: OK • EUR/USD found • price not found")
+                    overlay.show("WAIT • reading price", 0.0)
+                    return@addOnSuccessListener
+                }
+
+                val chart = cropChart(bitmap)
+                val candles = candleDetector.detect(chart)
+                val pattern = patternClassifier.classify(candles)
+                chart.recycle()
+
+                val signal = engine.add(price, now, pattern.bias, pattern.confidence)
+                updateSignal(signal, price, pattern.name, candles.size)
             }
             .addOnFailureListener {
+                publish("CAPTURE: OK • OCR ERROR")
+                overlay.show("WAIT • OCR error", 0.0)
+            }
+            .addOnCompleteListener {
                 bitmap.recycle()
+                processing = false
             }
     }
 
-    private fun updateNotification(signal: String, confidence: Double, price: Double) {
-        val pct = String.format(Locale.US, "%.1f%%", confidence * 100.0)
-        val text = "$signal • confidence $pct • price $price"
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(42, notification(text))
+    private fun cropChart(bitmap: Bitmap): Bitmap {
+        val left = (bitmap.width * 0.02f).toInt().coerceAtLeast(0)
+        val top = (bitmap.height * 0.24f).toInt().coerceAtLeast(0)
+        val right = (bitmap.width * 0.98f).toInt().coerceAtMost(bitmap.width)
+        val bottom = (bitmap.height * 0.78f).toInt().coerceAtMost(bitmap.height)
+        return Bitmap.createBitmap(bitmap, left, top, (right - left).coerceAtLeast(1), (bottom - top).coerceAtLeast(1))
+    }
+
+    private fun imageToBitmap(image: Image): Bitmap? {
+        return try {
+            val plane = image.planes[0]
+            val buffer = plane.buffer
+            val pixelStride = plane.pixelStride
+            val rowStride = plane.rowStride
+            val rowPadding = rowStride - pixelStride * image.width
+            val paddedWidth = image.width + rowPadding / pixelStride
+            val padded = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
+            buffer.rewind()
+            padded.copyPixelsFromBuffer(buffer)
+            if (paddedWidth == image.width) padded
+            else Bitmap.createBitmap(padded, 0, 0, image.width, image.height).also { padded.recycle() }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun updateSignal(signal: SignalResult, price: Double, pattern: String, candleCount: Int) {
+        val pct = String.format(Locale.US, "%.1f%%", signal.confidence * 100.0)
+        publish("$signal • $pct • price ${String.format(Locale.US, "%.6f", price)} • candles $candleCount • $pattern")
+        overlay.show(signal.signal, signal.confidence)
+    }
+
+    private fun publish(text: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastUiUpdate < 700L && text.startsWith("CAPTURE: OK")) return
+        lastUiUpdate = now
+        getSystemService(NotificationManager::class.java).notify(42, notification(text))
     }
 
     private fun notification(text: String): Notification =
@@ -137,10 +206,12 @@ class ScreenCaptureService : Service() {
     }
 
     private fun stopCapture() {
-        if (::reader.isInitialized) reader.close()
+        try { if (::reader.isInitialized) reader.close() } catch (_: Throwable) {}
         display?.release()
-        if (::projection.isInitialized) projection.stop()
+        display = null
+        try { if (::projection.isInitialized) projection.stop() } catch (_: Throwable) {}
         recognizer.close()
+        try { overlay.hide() } catch (_: Throwable) {}
     }
 
     override fun onDestroy() {

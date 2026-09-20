@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -19,6 +20,7 @@ import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
     private val captureCode = 701
+    private val overlayCode = 702
     private lateinit var status: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -31,14 +33,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         val title = TextView(this).apply {
-            text = "GuruVision Bot"
+            text = "GuruVision Bot V3"
             textSize = 28f
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
         }
 
         status = TextView(this).apply {
-            text = "Ready — select GuruTrade7 before starting."
+            text = "Ready — select EUR/USD (OTC)."
             textSize = 16f
             gravity = Gravity.CENTER
             setPadding(0, 30, 0, 30)
@@ -47,6 +49,11 @@ class MainActivity : AppCompatActivity() {
         val start = Button(this).apply {
             text = "START SCREEN VISION"
             setOnClickListener { requestCapture() }
+        }
+
+        val overlay = Button(this).apply {
+            text = "ENABLE FLOATING OVERLAY"
+            setOnClickListener { requestOverlayPermission() }
         }
 
         val stop = Button(this).apply {
@@ -60,23 +67,41 @@ class MainActivity : AppCompatActivity() {
         box.addView(title)
         box.addView(status)
         box.addView(start)
+        box.addView(overlay)
         box.addView(stop)
         setContentView(box)
 
         if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-            != PackageManager.PERMISSION_GRANTED) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 900)
         }
     }
 
+    private fun requestOverlayPermission() {
+        if (Settings.canDrawOverlays(this)) {
+            status.text = "Floating overlay permission is already enabled."
+            return
+        }
+        val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+        startActivityForResult(intent, overlayCode)
+    }
+
     private fun requestCapture() {
+        if (!Settings.canDrawOverlays(this)) {
+            status.text = "Enable floating overlay first."
+            requestOverlayPermission()
+            return
+        }
         val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         startActivityForResult(mgr.createScreenCaptureIntent(), captureCode)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == overlayCode) {
+            status.text = if (Settings.canDrawOverlays(this)) "Overlay enabled. Tap START SCREEN VISION." else "Overlay permission not enabled."
+            return
+        }
         if (requestCode != captureCode || resultCode != Activity.RESULT_OK || data == null) {
             status.text = "Screen capture permission was not granted."
             return
@@ -87,6 +112,6 @@ class MainActivity : AppCompatActivity() {
             putExtra("projectionData", data)
         }
         ContextCompat.startForegroundService(this, intent)
-        status.text = "Vision service running. Open GuruTrade7."
+        status.text = "Vision service running. Open GuruTrade7 and select EUR/USD (OTC)."
     }
 }
