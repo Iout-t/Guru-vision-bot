@@ -448,7 +448,7 @@ class SignalEngine {
                 .count {
                     it == momentumDirection &&
                         it != 0.0
-                )
+                }
                 .toDouble() / 3.0
 
         /*
@@ -683,4 +683,4 @@ class SignalEngine {
     fun latest(): SignalResult {
         return lastResult
     }
-    }
+}
