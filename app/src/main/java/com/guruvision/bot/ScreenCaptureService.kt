@@ -138,7 +138,7 @@ class ScreenCaptureService : Service() {
                 val pattern = patternClassifier.classify(candles)
                 chart.recycle()
 
-                val signal = engine.add(price, now, pattern.bias, pattern.confidence)
+                val signal = engine.addPrice(price, now)
                 updateSignal(signal, price, pattern.name, candles.size)
             }
             .addOnFailureListener {
