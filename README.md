@@ -1,38 +1,44 @@
-# GuruVision Bot — Android screen-vision prototype
+# GuruVision Bot V2
 
-This project captures the Android screen with MediaProjection, runs local
-OCR with ML Kit, extracts a EUR/USD-like displayed price, and feeds the
-price into a rolling 5-second CALL/PUT/RANGE/WAIT engine.
+Android screen-vision prototype for GuruTrade7 EUR/USD (OTC).
 
-## Build
+## Included
 
-Open this folder in Android Studio and let Gradle sync. Then run the app on
-the Android phone.
+- MediaProjection screen capture
+- ML Kit price OCR
+- Chart-region computer vision
+- Candle-like structure detection
+- Candle pattern classifier
+- User calibration model for symbol/price/chart regions
+- Adaptive layout heuristic
+- 5-second signal engine
+- CALL / PUT / RANGE / WAIT
+- Room signal-history database
+- Floating signal overlay
+- GuruTrade7 launch/focus helper
+- GitHub Actions APK build
 
-The app targets Android 35 and declares the mediaProjection foreground
-service type. Android requires the user to approve screen capture before
-the capture service can start.
+## Build on GitHub
 
-## Run
+Push the repository to GitHub, then:
+Actions -> Build GuruVision APK -> Run workflow.
 
-1. Launch GuruVision Bot.
-2. Tap START SCREEN VISION.
-3. Accept Android's screen-capture permission.
-4. Switch to GuruTrade7.
-5. Keep EUR/USD (OTC) visible.
-6. The persistent notification shows the latest detected signal.
+## Android permissions
 
-## Current prototype limitation
+The app requires screen-capture approval. The overlay feature requires the
+Android "draw over other apps" permission. Notification permission is needed
+on Android 13+ for notifications.
 
-The first prototype OCRs the full screen. This is intentionally simple for
-the first calibration pass. For reliable GuruTrade7 use, the next pass should
-crop the exact price region and chart region from the user's device screenshot,
-then add a calibration UI so the rectangles can be adjusted for different
-screen resolutions.
+## Important
 
-This app does not place trades.
+The current candle detector is a lightweight screen-CV prototype and should
+be calibrated/tuned to the exact GuruTrade7 chart theme and device resolution.
 
-## Dependencies
+The interaction helper can open/focus GuruTrade7, but this project does not
+automatically place or submit financial trades.
 
-ML Kit bundled Latin text recognition is used so the OCR model is packaged
-with the app rather than requiring a first-run model download.
+## Signal interpretation
+
+Confidence is an internal analysis score, not a guaranteed probability of
+the next 5-second price movement. Screen capture/OCR latency is explicitly
+part of the system's uncertainty.
