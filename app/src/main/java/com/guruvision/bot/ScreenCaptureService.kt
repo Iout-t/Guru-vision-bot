@@ -180,7 +180,7 @@ class ScreenCaptureService : Service() {
     private fun updateSignal(signal: SignalResult, price: Double, pattern: String, candleCount: Int) {
         val pct = String.format(Locale.US, "%.1f%%", signal.confidence * 100.0)
         publish("$signal • $pct • price ${String.format(Locale.US, "%.6f", price)} • candles $candleCount • $pattern")
-        overlay.show(signal.signal, signal.confidence)
+        overlay.show(signal.signal.name, signal.confidence)
     }
 
     private fun publish(text: String) {
